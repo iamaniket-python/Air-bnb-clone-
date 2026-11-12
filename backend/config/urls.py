@@ -6,6 +6,10 @@ from django.urls import include, path
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", include("apps.core.urls")),
+    path("api/auth/", include("apps.accounts.urls")),
+    # Aage ke phases mein yahan include honge:
+    # path("api/properties/", include("apps.properties.urls")),
+    # path("api/bookings/", include("apps.bookings.urls")),
 ]
 
 if settings.DEBUG:

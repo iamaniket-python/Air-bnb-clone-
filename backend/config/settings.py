@@ -26,6 +26,7 @@ DJANGO_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "django.contrib.postgres",  # ExclusionConstraint / range fields (bookings)
 ]
 
 THIRD_PARTY_APPS = [
@@ -108,6 +109,9 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
+# Password reset link kitni der valid rahega (seconds): 1 ghanta
+PASSWORD_RESET_TIMEOUT = 60 * 60
+
 # ---------------------------------------------------------------------------
 # Internationalization
 # ---------------------------------------------------------------------------
@@ -128,6 +132,23 @@ MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # ---------------------------------------------------------------------------
+# Email (dev mein console par print hoti hai)
+# ---------------------------------------------------------------------------
+EMAIL_BACKEND = config(
+    "EMAIL_BACKEND",
+    default="django.core.mail.backends.console.EmailBackend",
+)
+EMAIL_HOST = config("EMAIL_HOST", default="")
+EMAIL_PORT = config("EMAIL_PORT", default=587, cast=int)
+EMAIL_USE_TLS = config("EMAIL_USE_TLS", default=True, cast=bool)
+EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="")
+EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
+DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="StayNest <noreply@staynest.local>")
+
+# Frontend URL: password reset link isi se banta hai
+FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:5173")
+
+# ---------------------------------------------------------------------------
 # Django REST Framework
 # ---------------------------------------------------------------------------
 REST_FRAMEWORK = {
@@ -146,6 +167,11 @@ REST_FRAMEWORK = {
         "rest_framework.filters.OrderingFilter",
     ),
     "EXCEPTION_HANDLER": "apps.core.exceptions.custom_exception_handler",
+    # Scoped throttling: login/register/password-reset par brute-force se bachav
+    "DEFAULT_THROTTLE_RATES": {
+        "auth": "10/min",
+        "password_reset": "5/hour",
+    },
 }
 
 # ---------------------------------------------------------------------------
