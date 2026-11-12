@@ -1,0 +1,28 @@
+@'
+# Environment files (real secrets) - NEVER commit
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Django
+*.sqlite3
+media/
+staticfiles/
+
+# Node / React (frontend ke liye)
+node_modules/
+dist/
+build/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+'@ | Set-Content -Path .gitignore -Encoding ascii
