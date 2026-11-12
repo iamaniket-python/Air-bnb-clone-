@@ -1,13 +1,17 @@
-from django.db.models import Q
+from django.db.models import Count, Prefetch, Q
 from django.shortcuts import get_object_or_404
+from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.filters import SearchFilter
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
+from apps.core.pagination import StandardPagination
 from apps.core.permissions import IsHost, IsHostOrAdmin
 
+from .filters import PropertyFilter, StableOrderingFilter
 from .models import Amenity, Property, PropertyImage
 from .permissions import IsAdminOrReadOnly, IsPropertyOwnerOrAdminOrReadOnly
 from .serializers import (
@@ -38,15 +42,24 @@ class AmenityViewSet(viewsets.ModelViewSet):
 
 class PropertyViewSet(viewsets.ModelViewSet):
     """
-    list / retrieve : public (sirf active properties)
+    list / retrieve : public (list mein sirf active properties, search + filters ke saath)
     create          : sirf host
     update / delete : owner host ya admin
-    my              : host ki apni saari listings
+    my              : host ki apni saari listings (filters yahan bhi chalte hain)
+    destinations    : search bar autocomplete
     images          : image upload / update / delete
     """
 
+    # Search, filter, sort, pagination (sirf list par; filter_queryset niche dekho)
+    filter_backends = [DjangoFilterBackend, SearchFilter, StableOrderingFilter]
+    filterset_class = PropertyFilter
+    search_fields = ["title", "city", "state", "address"]
+    ordering_fields = ["price_per_night", "average_rating", "review_count", "created_at"]
+    ordering = ["-created_at", "-id"]
+    pagination_class = StandardPagination
+
     def get_permissions(self):
-        if self.action in ("list", "retrieve"):
+        if self.action in ("list", "retrieve", "destinations"):
             permission_classes = [AllowAny]
         elif self.action in ("create", "my"):
             permission_classes = [IsHost]
@@ -64,10 +77,16 @@ class PropertyViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
 
-        # N+1 se bachne ke liye select_related / prefetch_related
-        queryset = Property.objects.select_related("host__profile").prefetch_related(
-            "images", "amenities"
-        )
+        if self.action in ("list", "my"):
+            # Card ko sirf 1 image chahiye: sliced Prefetch se har property ki sirf pehli
+            # (primary) image aati hai. Profile/amenities bhi nahi chahiye.
+            queryset = Property.objects.select_related("host").prefetch_related(
+                Prefetch("images", queryset=PropertyImage.objects.all()[:1])
+            )
+        else:
+            queryset = Property.objects.select_related("host__profile").prefetch_related(
+                "images", "amenities"
+            )
 
         if self.action == "list":
             return queryset.filter(is_active=True)
@@ -79,6 +98,13 @@ class PropertyViewSet(viewsets.ModelViewSet):
             # Active properties + user ki apni (inactive bhi)
             return queryset.filter(Q(is_active=True) | Q(host=user))
         return queryset.filter(is_active=True)
+
+    def filter_queryset(self, queryset):
+        # DRF ka get_object() bhi filter_queryset chalata hai. Filters sirf listing par
+        # lagne chahiye, warna /properties/1/?min_price=99999 detail ko 404 bana deta.
+        if self.action in ("list", "my"):
+            return super().filter_queryset(queryset)
+        return queryset
 
     def perform_create(self, serializer):
         serializer.save(host=self.request.user)
@@ -97,6 +123,22 @@ class PropertyViewSet(viewsets.ModelViewSet):
     def my(self, request):
         """GET /api/properties/my/"""
         return self.list(request)
+
+    @action(detail=False, methods=["get"], url_path="destinations")
+    def destinations(self, request):
+        """GET /api/properties/destinations/?q=go  (search bar suggestions, max 8)"""
+        query = request.query_params.get("q", "").strip()
+        if len(query) < 2:
+            return Response([])
+
+        rows = (
+            Property.objects.filter(is_active=True)
+            .filter(Q(city__icontains=query) | Q(state__icontains=query))
+            .values("city", "state", "country")
+            .annotate(property_count=Count("id"))
+            .order_by("-property_count", "city")[:8]
+        )
+        return Response(list(rows))
 
     @action(
         detail=True,

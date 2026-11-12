@@ -1,11 +1,22 @@
-from rest_framework.routers import SimpleRouter
+from django.urls import path
+from rest_framework.routers import DefaultRouter
 
-from .views import AmenityViewSet, PropertyViewSet
+from .views import PropertyViewSet, AmenityViewSet
 
 app_name = "properties"
 
-router = SimpleRouter()
-router.register("properties", PropertyViewSet, basename="property")
-router.register("amenities", AmenityViewSet, basename="amenity")
+router = DefaultRouter()
+
+router.register(
+    r"",
+    PropertyViewSet,
+    basename="property"
+)
+
+router.register(
+    r"amenities",
+    AmenityViewSet,
+    basename="amenity"
+)
 
 urlpatterns = router.urls
