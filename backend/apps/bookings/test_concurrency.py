@@ -75,7 +75,9 @@ class BookingConcurrencyTests(TransactionTestCase):
         )
 
     def test_partially_overlapping_dates_only_one_succeeds(self):
-        ranges = [(0, 3), (1, 4), (2, 5), (0, 2)]  # sab ek dusre se overlap karte hain
+        # Har range ke andar "day 2" aata hai, isliye sab ek dusre se overlap karti hain.
+        # (Pehle (0,2) aur (2,5) back-to-back the, wo legit dono succeed ho jaate the.)
+        ranges = [(0, 3), (1, 4), (2, 5), (1, 3)]
         tasks = [
             (lambda g=g, a=a, b=b: services.create_booking(
                 guest=g,
@@ -87,8 +89,15 @@ class BookingConcurrencyTests(TransactionTestCase):
             for g, (a, b) in zip(self.guests, ranges)
         ]
         results = self.run_in_threads(tasks)
+
         self.assertEqual(results.count("ok"), 1, results)
         self.assertEqual(results.count("conflict"), 3, results)
+        self.assertEqual(
+            Booking.objects.filter(
+                property=self.prop, status__in=ACTIVE_BOOKING_STATUSES
+            ).count(),
+            1,
+        )
 
     def test_non_overlapping_dates_all_succeed(self):
         tasks = [
