@@ -9,7 +9,7 @@ urlpatterns = [
     path("api/auth/", include("apps.accounts.urls")),
     path("api/bookings/", include("apps.bookings.urls")),    
     path("api/", include("apps.properties.urls")),          
-    # path("api/payments/", include("apps.payments.urls")),
+    path("api/payments/", include("apps.payments.urls")),
 ]
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
