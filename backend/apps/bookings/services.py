@@ -308,6 +308,12 @@ def cancel_booking(*, booking_id, actor, reason="", now=None):
         booking.cancelled_at = now
         booking.cancellation_reason = reason
         booking.save(update_fields=["status", "cancelled_at", "cancellation_reason", "updated_at"])
+
+        # Phase 7: payment cleanup + refund, isi transaction mein
+        # (lazy import: bookings aur payments apps ke beech circular import se bachne ke liye)
+        from apps.payments.services import process_booking_cancellation
+
+        process_booking_cancellation(booking, refund_percentage)
     return booking, refund_percentage
 
 
