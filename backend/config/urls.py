@@ -5,13 +5,11 @@ from django.urls import include, path
 
 urlpatterns = [
     path("admin/", admin.site.urls),
-    path("api/", include("apps.core.urls")),
+    path("api/", include("apps.core.urls")),                
     path("api/auth/", include("apps.accounts.urls")),
-    path(
-        "api/properties/",
-        include("apps.properties.urls", namespace="properties"),
-    ),
+    path("api/bookings/", include("apps.bookings.urls")),    
+    path("api/", include("apps.properties.urls")),          
+    # path("api/payments/", include("apps.payments.urls")),
 ]
-
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

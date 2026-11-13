@@ -1,4 +1,4 @@
-from django.db.models import Count, Prefetch, Q
+from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, viewsets
@@ -77,12 +77,10 @@ class PropertyViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
 
+        # N+1 se bachne ke liye select_related / prefetch_related
         if self.action in ("list", "my"):
-            # Card ko sirf 1 image chahiye: sliced Prefetch se har property ki sirf pehli
-            # (primary) image aati hai. Profile/amenities bhi nahi chahiye.
-            queryset = Property.objects.select_related("host").prefetch_related(
-                Prefetch("images", queryset=PropertyImage.objects.all()[:1])
-            )
+            # Card ko host ka naam aur images chahiye; profile/amenities nahi
+            queryset = Property.objects.select_related("host").prefetch_related("images")
         else:
             queryset = Property.objects.select_related("host__profile").prefetch_related(
                 "images", "amenities"
