@@ -13,6 +13,11 @@ import Payment from '../pages/Payment'
 import MyBookings from '../pages/MyBookings'
 import Wishlist from '../pages/Wishlist'
 import Profile from '../pages/Profile'
+import HostDashboard from '../pages/HostDashboard'
+import HostProperties from '../pages/HostProperties'
+import AddProperty from '../pages/AddProperty'
+import EditProperty from '../pages/EditProperty'
+import HostReservations from '../pages/HostReservations'
 import ComingSoon from '../pages/ComingSoon'
 import Forbidden from '../pages/Forbidden'
 import NotFound from '../pages/NotFound'
@@ -51,10 +56,11 @@ export default function AppRoutes() {
 
         {/* Host (10d) */}
         <Route element={<ProtectedRoute roles={['host']} />}>
-          <Route path="/host/dashboard" element={<ComingSoon title="Host dashboard" phase="10d" />} />
-          <Route path="/host/properties/new" element={<ComingSoon title="Add property" phase="10d" />} />
-          <Route path="/host/properties/:id/edit" element={<ComingSoon title="Edit property" phase="10d" />} />
-          <Route path="/host/reservations" element={<ComingSoon title="Host reservations" phase="10d" />} />
+          <Route path="/host/dashboard" element={<HostDashboard />} />
+          <Route path="/host/properties" element={<HostProperties />} />
+          <Route path="/host/properties/new" element={<AddProperty />} />
+          <Route path="/host/properties/:id/edit" element={<EditProperty />} />
+          <Route path="/host/reservations" element={<HostReservations />} />
         </Route>
 
         {/* Admin (10e) */}
