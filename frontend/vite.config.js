@@ -10,4 +10,14 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
   },
+  test: {
+    environment: 'jsdom',
+    // jsdom ka origin fix: API base isi origin ke andar rakha hai, taaki CORS na lage
+    environmentOptions: { jsdom: { url: 'http://localhost:3000' } },
+    globals: true,
+    setupFiles: './src/test/setup.js',
+    include: ['src/test/**/*.test.{js,jsx}'],
+    css: false,
+    env: { VITE_API_BASE_URL: 'http://localhost:3000/api' },
+  },
 })

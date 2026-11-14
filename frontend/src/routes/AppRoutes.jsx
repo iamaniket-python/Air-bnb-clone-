@@ -1,6 +1,7 @@
 import { Route, Routes } from 'react-router-dom'
 import AuthLayout from '../layouts/AuthLayout'
 import MainLayout from '../layouts/MainLayout'
+import AdminLayout from '../layouts/AdminLayout'
 import ProtectedRoute from './ProtectedRoute'
 import PublicOnlyRoute from './PublicOnlyRoute'
 import Home from '../pages/Home'
@@ -18,11 +19,14 @@ import HostProperties from '../pages/HostProperties'
 import AddProperty from '../pages/AddProperty'
 import EditProperty from '../pages/EditProperty'
 import HostReservations from '../pages/HostReservations'
-import ComingSoon from '../pages/ComingSoon'
+import AdminDashboard from '../pages/AdminDashboard'
+import AdminUsers from '../pages/AdminUsers'
+import AdminProperties from '../pages/AdminProperties'
+import AdminBookings from '../pages/AdminBookings'
+import AdminReviews from '../pages/AdminReviews'
 import Forbidden from '../pages/Forbidden'
 import NotFound from '../pages/NotFound'
 
-// Aage ke phases mein ComingSoon ki jagah asli page element lagega
 export default function AppRoutes() {
   return (
     <Routes>
@@ -63,9 +67,15 @@ export default function AppRoutes() {
           <Route path="/host/reservations" element={<HostReservations />} />
         </Route>
 
-        {/* Admin (10e) */}
+        {/* Admin (10e): AdminLayout tab bar deta hai */}
         <Route element={<ProtectedRoute roles={['admin']} />}>
-          <Route path="/admin/dashboard" element={<ComingSoon title="Admin dashboard" phase="10e" />} />
+          <Route element={<AdminLayout />}>
+            <Route path="/admin/dashboard" element={<AdminDashboard />} />
+            <Route path="/admin/users" element={<AdminUsers />} />
+            <Route path="/admin/properties" element={<AdminProperties />} />
+            <Route path="/admin/bookings" element={<AdminBookings />} />
+            <Route path="/admin/reviews" element={<AdminReviews />} />
+          </Route>
         </Route>
 
         <Route path="/403" element={<Forbidden />} />
