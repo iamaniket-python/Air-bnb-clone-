@@ -1,12 +1,12 @@
-# 🏡 StayFinder – Airbnb Clone
+# 🏡 StayNest – Airbnb Clone
 
 A full-stack accommodation booking platform inspired by Airbnb, built using **Python, Django REST Framework, React.js, and PostgreSQL**.
 
-StayFinder allows users to discover properties, explore accommodation details, book stays, manage reservations, and list their own properties as hosts.
+StayNest allows users to discover properties, explore accommodation details, book stays, manage reservations, and list their own properties as hosts.
 
 ## 🚀 Project Overview
 
-StayFinder is a full-stack web application designed to simplify the property rental and booking experience. It provides separate functionalities for guests, hosts, and administrators.
+StayNest is a full-stack web application designed to simplify the property rental and booking experience. It provides separate functionalities for guests, hosts, and administrators.
 
 The project focuses on building a scalable backend architecture, secure REST APIs, real-time availability validation, and a responsive frontend.
 
@@ -99,7 +99,7 @@ The project focuses on building a scalable backend architecture, secure REST API
 ## 📁 Project Structure
 
 ```text
-StayFinder/
+StayNest/
 │
 ├── backend/
 │   ├── config/
@@ -140,9 +140,9 @@ StayFinder/
 ### 1. Clone Repository
 
 ```bash
-git clone https://github.com/your-username/stayfinder.git
+git clone https://github.com/your-username/StayNest.git
 
-cd stayfinder
+cd StayNest
 ```
 
 ### 2. Backend Setup
@@ -227,7 +227,7 @@ Create a `.env` file inside the backend directory.
 ```env
 SECRET_KEY=your-django-secret-key
 DEBUG=True
-DATABASE_NAME=stayfinder
+DATABASE_NAME=StayNest
 DATABASE_USER=postgres
 DATABASE_PASSWORD=your-password
 DATABASE_HOST=localhost
