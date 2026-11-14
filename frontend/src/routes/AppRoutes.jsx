@@ -6,6 +6,8 @@ import PublicOnlyRoute from './PublicOnlyRoute'
 import Home from '../pages/Home'
 import Login from '../pages/Login'
 import Register from '../pages/Register'
+import PropertyListing from '../pages/PropertyListing'
+import PropertyDetails from '../pages/PropertyDetails'
 import ComingSoon from '../pages/ComingSoon'
 import Forbidden from '../pages/Forbidden'
 import NotFound from '../pages/NotFound'
@@ -25,9 +27,9 @@ export default function AppRoutes() {
         <Route index element={<Home />} />
 
         {/* Public (10b) */}
-        <Route path="/properties" element={<ComingSoon title="Property listing" phase="10b" />} />
-        <Route path="/search" element={<ComingSoon title="Search results" phase="10b" />} />
-        <Route path="/properties/:id" element={<ComingSoon title="Property details" phase="10b" />} />
+        <Route path="/properties" element={<PropertyListing mode="listing" />} />
+        <Route path="/search" element={<PropertyListing mode="search" />} />
+        <Route path="/properties/:id" element={<PropertyDetails />} />
 
         {/* Guest (10c) */}
         <Route element={<ProtectedRoute roles={['guest']} />}>

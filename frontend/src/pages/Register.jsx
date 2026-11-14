@@ -26,7 +26,7 @@ export default function Register() {
     register,
     handleSubmit,
     setError,
-    watch,
+    getValues,
     formState: { errors, isSubmitting },
   } = useForm({
     defaultValues: {
@@ -163,7 +163,7 @@ export default function Register() {
           error={errors.password2?.message}
           {...register('password2', {
             required: 'Please confirm your password',
-            validate: (value) => value === watch('password') || 'Passwords do not match',
+            validate: (value) => value === getValues('password') || 'Passwords do not match',
           })}
         />
 
