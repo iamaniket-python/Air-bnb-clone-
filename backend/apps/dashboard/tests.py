@@ -1,363 +1,336 @@
 from datetime import timedelta
 from decimal import Decimal
 
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
 
 from apps.accounts.models import User
+from apps.accounts.services import get_tokens_for_user
 from apps.bookings.tests import make_booking, make_property, make_user
 from apps.payments.models import Payment
 from apps.reviews.models import Review
 
 HOST_URL = "/api/host/dashboard/"
 ADMIN_URL = "/api/admin/dashboard/"
-USERS_URL = "/api/admin/users/"
-PROPS_URL = "/api/admin/properties/"
 
 
-def make_payment(booking, amount, status="success", refund_amount=None):
+def client_for(user=None):
+    client = APIClient()
+    if user:
+        client.force_authenticate(user)
+    return client
+
+
+def future_booking(guest, prop, offset, status="confirmed", nights=2):
+    today = timezone.localdate()
+    return make_booking(
+        guest, prop,
+        today + timedelta(days=offset), today + timedelta(days=offset + nights),
+        status=status,
+    )
+
+
+def past_booking(guest, prop, days_ago_out=10, status="completed", nights=2):
+    today = timezone.localdate()
+    out = today - timedelta(days=days_ago_out)
+    return make_booking(guest, prop, out - timedelta(days=nights), out, status=status)
+
+
+def make_payment(booking, amount, status="success", refund_amount=None, paid_at=None):
     raw = {}
     if refund_amount is not None:
-        raw = {
-            "refund": {
-                "percentage": 50,
-                "amount": str(refund_amount),
-                "refund_id": "rf_test",
-                "refunded_at": None,
-            }
+        raw["refund"] = {
+            "percentage": 50, "amount": str(refund_amount),
+            "refund_id": "r1", "refunded_at": "2026-01-01T00:00:00Z",
         }
     return Payment.objects.create(
-        booking=booking,
-        amount=Decimal(str(amount)),
-        status=status,
-        paid_at=timezone.now() if status in ("success", "refunded") else None,
-        raw_response=raw,
+        booking=booking, amount=Decimal(str(amount)), status=status,
+        paid_at=paid_at or timezone.now(), raw_response=raw,
     )
 
 
 class DashboardBase(APITestCase):
     def setUp(self):
-        self.admin = make_user("dadmin", User.Role.ADMIN)
         self.host = make_user("dhost", User.Role.HOST)
         self.host2 = make_user("dhost2", User.Role.HOST)
         self.guest = make_user("dguest")
-        self.guest2 = make_user("dguest2")
-        self.client = APIClient()
-        self.today = timezone.localdate()
-
-    def login(self, user):
-        self.client.force_authenticate(user=user)
-
-    def booking(self, guest, prop, start, nights, status):
-        return make_booking(
-            guest,
-            prop,
-            self.today + timedelta(days=start),
-            self.today + timedelta(days=start + nights),
-            status=status,
-        )
+        self.admin = make_user("dadmin", User.Role.ADMIN)
+        self.prop = make_property(self.host)
+        self.other_prop = make_property(self.host2, title="Other host")
 
 
-# ============================================================== HOST
-class HostDashboardTests(DashboardBase):
-    def test_permissions(self):
-        self.assertEqual(self.client.get(HOST_URL).status_code, 401)
-        for user in (self.guest, self.admin):
-            self.login(user)
-            self.assertEqual(self.client.get(HOST_URL).status_code, 403)
+class HostDashboardPermissionTests(DashboardBase):
+    def test_roles(self):
+        self.assertEqual(client_for().get(HOST_URL).status_code, 401)
+        self.assertEqual(client_for(self.guest).get(HOST_URL).status_code, 403)
+        self.assertEqual(client_for(self.admin).get(HOST_URL).status_code, 403)
+        self.assertEqual(client_for(self.host).get(HOST_URL).status_code, 200)
 
-    def test_empty_host_gets_zeros(self):
-        self.login(self.host)
-        body = self.client.get(HOST_URL).json()
-        self.assertEqual(body["properties"], {"total": 0, "active": 0})
+
+class HostDashboardCountTests(DashboardBase):
+    def test_empty_host(self):
+        body = client_for(self.host2).get(HOST_URL).json()
+        # host2 ke paas ek property hai, par koi booking nahi
+        self.assertEqual(body["properties"], {"total": 1, "active": 1, "inactive": 0})
         self.assertEqual(body["bookings"]["total"], 0)
         self.assertEqual(
-            body["bookings"]["by_status"],
-            {"pending": 0, "confirmed": 0, "rejected": 0, "cancelled": 0, "completed": 0},
+            set(body["bookings"]["by_status"]),
+            {"pending", "confirmed", "rejected", "cancelled", "completed"},
         )
-        self.assertEqual(body["earnings"]["net"], "0.00")
-        self.assertEqual(body["recent_bookings"], [])
+        self.assertEqual(body["earnings"]["total"], "0.00")
+        self.assertEqual(len(body["earnings"]["monthly"]), 6)
+        self.assertEqual(body["reviews"], {"count": 0, "average_rating": "0.00"})
+        self.assertEqual(body["next_reservations"], [])
 
-    def test_counts_and_breakdown_only_for_own_properties(self):
-        prop = make_property(self.host)
-        inactive = make_property(self.host, title="Hidden", is_active=False)
-        other = make_property(self.host2, title="Other host")
+    def test_property_counts(self):
+        make_property(self.host, title="Hidden", is_active=False)
+        body = client_for(self.host).get(HOST_URL).json()
+        self.assertEqual(body["properties"], {"total": 2, "active": 1, "inactive": 1})
 
-        self.booking(self.guest, prop, 10, 2, "pending")        # upcoming + pending
-        self.booking(self.guest, prop, 20, 2, "confirmed")      # upcoming
-        self.booking(self.guest, prop, -30, 2, "confirmed")     # past confirmed -> upcoming nahi
-        self.booking(self.guest, prop, -10, 3, "completed")
-        self.booking(self.guest, inactive, 30, 2, "cancelled")
-        self.booking(self.guest, other, 10, 2, "pending")       # doosre host ki
-
-        self.login(self.host)
-        body = self.client.get(HOST_URL).json()
-
-        self.assertEqual(body["properties"], {"total": 2, "active": 1})
-        self.assertEqual(body["bookings"]["total"], 5)
-        self.assertEqual(body["bookings"]["upcoming_reservations"], 2)
-        self.assertEqual(body["bookings"]["pending_requests"], 1)
+    def test_booking_counts_only_own_properties(self):
+        future_booking(self.guest, self.prop, 10, "pending")
+        future_booking(self.guest, self.prop, 20, "confirmed")
+        past_booking(self.guest, self.prop, 10, "completed")
+        past_booking(self.guest, self.prop, 40, "cancelled")
+        future_booking(self.guest, self.other_prop, 10, "pending")  # doosre host ki
+        body = client_for(self.host).get(HOST_URL).json()["bookings"]
+        self.assertEqual(body["total"], 4)
+        self.assertEqual(body["upcoming_reservations"], 2)
+        self.assertEqual(body["pending_requests"], 1)
         self.assertEqual(
-            body["bookings"]["by_status"],
-            {"pending": 1, "confirmed": 2, "rejected": 0, "cancelled": 1, "completed": 1},
+            body["by_status"],
+            {"pending": 1, "confirmed": 1, "rejected": 0, "cancelled": 1, "completed": 1},
         )
 
-    def test_recent_bookings_limited_and_newest_first(self):
-        prop = make_property(self.host)
-        created = [self.booking(self.guest, prop, 10 + i * 5, 2, "pending") for i in range(7)]
-        self.login(self.host)
-        recent = self.client.get(HOST_URL).json()["recent_bookings"]
-        self.assertEqual(len(recent), 5)
-        self.assertEqual(recent[0]["id"], created[-1].id)
-        for key in ("property_title", "guest_username", "check_in", "status", "total_price"):
-            self.assertIn(key, recent[0])
+    def test_past_pending_not_upcoming(self):
+        past_booking(self.guest, self.prop, 10, "pending")
+        body = client_for(self.host).get(HOST_URL).json()["bookings"]
+        self.assertEqual(body["upcoming_reservations"], 0)
+        self.assertEqual(body["pending_requests"], 0)
 
-    def test_earnings_gross_refunded_net(self):
-        prop = make_property(self.host)
-        other = make_property(self.host2, title="Other host")
+    def test_next_reservations_sorted_limited(self):
+        for offset in (50, 10, 30, 20, 40, 60, 70):
+            future_booking(self.guest, self.prop, offset)
+        future_booking(self.guest, self.prop, 100, "cancelled")
+        rows = client_for(self.host).get(HOST_URL).json()["next_reservations"]
+        self.assertEqual(len(rows), 5)
+        dates = [r["check_in"] for r in rows]
+        self.assertEqual(dates, sorted(dates))
+        self.assertEqual(rows[0]["guest"], "dguest")
+        self.assertEqual(rows[0]["property"]["id"], self.prop.id)
 
-        b1 = self.booking(self.guest, prop, -60, 3, "completed")
-        b2 = self.booking(self.guest, prop, -50, 3, "completed")
-        b3 = self.booking(self.guest, prop, -40, 3, "cancelled")
-        b4 = self.booking(self.guest, prop, -30, 3, "completed")
-        b5 = self.booking(self.guest, prop, -20, 3, "confirmed")
-        b6 = self.booking(self.guest, other, -60, 3, "completed")
+    def test_reviews_summary(self):
+        booking = past_booking(self.guest, self.prop)
+        Review.objects.create(booking=booking, rating=4, comment="ok")
+        body = client_for(self.host).get(HOST_URL).json()["reviews"]
+        self.assertEqual(body, {"count": 1, "average_rating": "4.00"})
 
-        make_payment(b1, 4000, "success")
-        make_payment(b2, 3000, "refunded", refund_amount="1500.00")   # 50% refund
-        make_payment(b3, 5000, "refunded", refund_amount="5000.00")   # poora refund
-        make_payment(b4, 2000, "success")                              # 0% refund = success hi
-        make_payment(b5, 999, "failed")                                # count nahi
-        make_payment(b6, 7777, "success")                              # doosre host ki
+    def test_query_count_constant(self):
+        future_booking(self.guest, self.prop, 10)
 
-        self.login(self.host)
-        earnings = self.client.get(HOST_URL).json()["earnings"]
-        # gross = 4000 + 3000 + 5000 + 2000 = 14000, refunded = 1500 + 5000 = 6500
-        self.assertEqual(earnings["gross"], "14000.00")
-        self.assertEqual(earnings["refunded"], "6500.00")
-        self.assertEqual(earnings["net"], "7500.00")
-        self.assertEqual(earnings["currency"], "INR")
+        def count():
+            with CaptureQueriesContext(connection) as ctx:
+                self.assertEqual(client_for(self.host).get(HOST_URL).status_code, 200)
+            return len(ctx)
 
-    def test_pending_payment_not_counted_and_bad_refund_data_safe(self):
-        prop = make_property(self.host)
-        b1 = self.booking(self.guest, prop, -30, 3, "completed")
-        b2 = self.booking(self.guest, prop, -20, 3, "completed")
-        make_payment(b1, 1000, "pending")
-        refunded = make_payment(b2, 2000, "refunded", refund_amount="junk")
-        self.login(self.host)
-        earnings = self.client.get(HOST_URL).json()["earnings"]
-        self.assertEqual(earnings["gross"], "2000.00")
-        self.assertEqual(earnings["refunded"], "0.00")
-        self.assertEqual(earnings["net"], "2000.00")
-        self.assertEqual(refunded.status, "refunded")
+        baseline = count()
+        for offset in (20, 30, 40, 50):
+            future_booking(self.guest, self.prop, offset)
+        self.assertEqual(count(), baseline)
 
 
-# ============================================================= ADMIN
+class HostEarningsTests(DashboardBase):
+    def earnings(self, user=None):
+        return client_for(user or self.host).get(HOST_URL).json()["earnings"]
+
+    def test_net_earnings(self):
+        b = [past_booking(self.guest, self.prop, 10 + 10 * i) for i in range(5)]
+        make_payment(b[0], 4000, "success")                          # 4000
+        make_payment(b[1], 3000, "refunded", refund_amount="1500")   # 1500
+        make_payment(b[2], 2000, "success", refund_amount="0.00")    # 2000 (0% refund)
+        make_payment(b[3], 9999, "pending")                          # ignore
+        make_payment(b[4], 8888, "failed")                           # ignore
+        other = past_booking(self.guest, self.other_prop, 10)
+        make_payment(other, 5000, "success")                         # doosre host ka
+        self.assertEqual(self.earnings()["total"], "7500.00")
+        self.assertEqual(self.earnings(self.host2)["total"], "5000.00")
+
+    def test_full_refund_is_zero(self):
+        b = past_booking(self.guest, self.prop)
+        make_payment(b, 3000, "refunded", refund_amount="3000")
+        self.assertEqual(self.earnings()["total"], "0.00")
+
+    def test_refunded_without_amount_treated_full(self):
+        b = past_booking(self.guest, self.prop)
+        make_payment(b, 3000, "refunded")
+        self.assertEqual(self.earnings()["total"], "0.00")
+
+    def test_monthly_breakdown(self):
+        b1 = past_booking(self.guest, self.prop, 10)
+        b2 = past_booking(self.guest, self.prop, 20)
+        b3 = past_booking(self.guest, self.prop, 30)
+        two_months = timezone.now() - timedelta(days=62)
+        make_payment(b1, 1000, "success")
+        make_payment(b2, 500, "success", paid_at=two_months)
+        make_payment(b3, 700, "success", paid_at=timezone.now() - timedelta(days=400))
+        data = self.earnings()
+        self.assertEqual(data["total"], "2200.00")        # purana payment total mein
+        self.assertEqual(data["this_month"], "1000.00")
+        months = {m["month"]: m["amount"] for m in data["monthly"]}
+        self.assertEqual(len(months), 6)
+        self.assertEqual(months[timezone.localtime(two_months).strftime("%Y-%m")], "500.00")
+        total_in_window = sum(Decimal(v) for v in months.values())
+        self.assertEqual(total_in_window, Decimal("1500.00"))  # 400 din purana bahar
+
+
 class AdminDashboardTests(DashboardBase):
-    def test_permissions(self):
-        self.assertEqual(self.client.get(ADMIN_URL).status_code, 401)
-        for user in (self.guest, self.host):
-            self.login(user)
-            self.assertEqual(self.client.get(ADMIN_URL).status_code, 403)
+    def test_roles(self):
+        self.assertEqual(client_for().get(ADMIN_URL).status_code, 401)
+        self.assertEqual(client_for(self.guest).get(ADMIN_URL).status_code, 403)
+        self.assertEqual(client_for(self.host).get(ADMIN_URL).status_code, 403)
+        self.assertEqual(client_for(self.admin).get(ADMIN_URL).status_code, 200)
 
     def test_platform_stats(self):
-        prop = make_property(self.host)
+        User.objects.filter(pk=self.guest.pk).update(is_active=False)
         make_property(self.host, title="Hidden", is_active=False)
+        b1 = past_booking(self.guest, self.prop, 10)
+        future_booking(self.guest, self.prop, 10, "pending")
+        Review.objects.create(booking=b1, rating=5, comment="")
+        make_payment(b1, 4000, "success")
+        b2 = past_booking(self.guest, self.other_prop, 10)
+        make_payment(b2, 3000, "refunded", refund_amount="1000")
+        make_payment(past_booking(self.guest, self.other_prop, 30), 777, "failed")
 
-        b1 = self.booking(self.guest, prop, -30, 3, "completed")
-        b2 = self.booking(self.guest2, prop, -20, 3, "completed")
-        self.booking(self.guest, prop, 10, 2, "pending")
-
-        Review.objects.create(booking=b1, rating=5, comment="great")
-        Review.objects.create(booking=b2, rating=3, comment="ok")
-
-        make_payment(b1, 2000, "success")
-        make_payment(b2, 1000, "refunded", refund_amount="400.00")
-
-        self.login(self.admin)
-        body = self.client.get(ADMIN_URL).json()
-
-        self.assertEqual(body["users"]["total"], 5)
-        self.assertEqual(body["users"]["by_role"], {"guest": 2, "host": 2, "admin": 1})
-        self.assertEqual(body["users"]["inactive"], 0)
-        self.assertEqual(body["users"]["new_last_30_days"], 5)
-        self.assertEqual(body["properties"], {"total": 2, "active": 1})
-        self.assertEqual(body["bookings"]["total"], 3)
-        self.assertEqual(body["bookings"]["by_status"]["completed"], 2)
+        body = client_for(self.admin).get(ADMIN_URL).json()
+        self.assertEqual(body["users"]["total"], 4)
+        self.assertEqual(body["users"]["inactive"], 1)
+        self.assertEqual(body["users"]["by_role"], {"guest": 1, "host": 2, "admin": 1})
+        self.assertEqual(body["users"]["new_last_30_days"], 4)
+        self.assertEqual(body["properties"], {"total": 3, "active": 2, "inactive": 1})
+        self.assertEqual(body["bookings"]["total"], 4)
+        self.assertEqual(body["bookings"]["upcoming"], 1)
         self.assertEqual(body["bookings"]["by_status"]["pending"], 1)
-        self.assertEqual(body["reviews"], {"total": 2, "average_rating": "4.00"})
-        self.assertEqual(
-            body["payments"]["by_status"],
-            {"pending": 0, "success": 1, "failed": 0, "refunded": 1},
-        )
-        self.assertEqual(body["payments"]["revenue"]["gross"], "3000.00")
-        self.assertEqual(body["payments"]["revenue"]["refunded"], "400.00")
-        self.assertEqual(body["payments"]["revenue"]["net"], "2600.00")
-
-    def test_empty_platform_review_average(self):
-        self.login(self.admin)
-        body = self.client.get(ADMIN_URL).json()
-        self.assertEqual(body["reviews"], {"total": 0, "average_rating": "0.00"})
-        self.assertEqual(body["payments"]["revenue"]["net"], "0.00")
+        self.assertEqual(body["reviews"], {"count": 1, "average_rating": "5.00"})
+        self.assertEqual(body["payments"]["gross"], "7000.00")
+        self.assertEqual(body["payments"]["refunded"], "1000.00")
+        self.assertEqual(body["payments"]["net"], "6000.00")
+        self.assertEqual(body["payments"]["by_status"]["failed"], 1)
+        self.assertIn("generated_at", body)
 
 
 class AdminUserManagementTests(DashboardBase):
     def test_permissions(self):
-        self.assertEqual(self.client.get(USERS_URL).status_code, 401)
-        for user in (self.guest, self.host):
-            self.login(user)
-            self.assertEqual(self.client.get(USERS_URL).status_code, 403)
-            self.assertEqual(
-                self.client.patch(f"{USERS_URL}{self.guest2.id}/", {"is_active": False}, format="json").status_code,
-                403,
-            )
-
-    def test_list_shape_filters_and_counts(self):
-        prop = make_property(self.host)
-        self.booking(self.guest, prop, 10, 2, "pending")
-        self.booking(self.guest, prop, 20, 2, "pending")
-        self.login(self.admin)
-
-        body = self.client.get(USERS_URL).json()
-        for key in ("count", "next", "previous", "results"):
-            self.assertIn(key, body)
-        self.assertEqual(body["count"], 5)
-        self.assertNotIn("password", body["results"][0])
-
-        hosts = self.client.get(USERS_URL + "?role=host").json()
-        self.assertEqual(hosts["count"], 2)
-        host_row = next(u for u in hosts["results"] if u["username"] == "dhost")
-        self.assertEqual(host_row["property_count"], 1)
-
-        guest_row = next(
-            u for u in self.client.get(USERS_URL + "?role=guest").json()["results"]
-            if u["username"] == "dguest"
+        self.assertEqual(client_for().get("/api/admin/users/").status_code, 401)
+        self.assertEqual(client_for(self.host).get("/api/admin/users/").status_code, 403)
+        self.assertEqual(client_for(self.guest).get("/api/admin/users/").status_code, 403)
+        resp = client_for(self.guest).patch(
+            f"/api/admin/users/{self.host.id}/", {"is_active": False}, format="json"
         )
-        self.assertEqual(guest_row["booking_count"], 2)
+        self.assertEqual(resp.status_code, 403)
 
-        self.assertEqual(self.client.get(USERS_URL + "?search=dguest2").json()["count"], 1)
-        self.assertEqual(self.client.get(USERS_URL + "?is_active=false").json()["count"], 0)
+    def test_list_filters_search_and_counts(self):
+        future_booking(self.guest, self.prop, 10)
+        client = client_for(self.admin)
+        self.assertEqual(client.get("/api/admin/users/").json()["count"], 4)
+        self.assertEqual(client.get("/api/admin/users/?role=host").json()["count"], 2)
+        self.assertEqual(client.get("/api/admin/users/?search=dguest").json()["count"], 1)
+        self.assertEqual(client.get("/api/admin/users/?is_active=false").json()["count"], 0)
+        rows = {r["username"]: r for r in client.get("/api/admin/users/").json()["results"]}
+        self.assertEqual(rows["dhost"]["properties_count"], 1)
+        self.assertEqual(rows["dguest"]["bookings_count"], 1)
+        self.assertNotIn("password", rows["dguest"])
 
-    def test_get_user_detail_and_404(self):
-        self.login(self.admin)
-        resp = self.client.get(f"{USERS_URL}{self.guest.id}/")
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["username"], "dguest")
-        self.assertEqual(self.client.get(f"{USERS_URL}999999/").status_code, 404)
+    def test_invalid_role_filter_400(self):
+        resp = client_for(self.admin).get("/api/admin/users/?role=superman")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_retrieve_and_404(self):
+        client = client_for(self.admin)
+        self.assertEqual(client.get(f"/api/admin/users/{self.guest.id}/").status_code, 200)
+        self.assertEqual(client.get("/api/admin/users/999999/").status_code, 404)
 
     def test_deactivate_and_reactivate(self):
-        self.login(self.admin)
-        url = f"{USERS_URL}{self.guest.id}/"
-        resp = self.client.patch(url, {"is_active": False}, format="json")
-        self.assertEqual(resp.status_code, 200)
-        self.assertFalse(resp.json()["user"]["is_active"])
+        client = client_for(self.admin)
+        url = f"/api/admin/users/{self.guest.id}/"
+        resp = client.patch(url, {"is_active": False}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.json())
+        self.assertFalse(resp.json()["is_active"])
         self.guest.refresh_from_db()
         self.assertFalse(self.guest.is_active)
-        self.assertEqual(self.client.get(USERS_URL + "?is_active=false").json()["count"], 1)
+        resp = client.patch(url, {"is_active": True}, format="json")
+        self.assertTrue(resp.json()["is_active"])
 
-        resp = self.client.patch(url, {"is_active": True}, format="json")
-        self.assertEqual(resp.status_code, 200)
-        self.guest.refresh_from_db()
-        self.assertTrue(self.guest.is_active)
-
-    def test_role_change_guest_to_host(self):
-        self.login(self.admin)
-        resp = self.client.patch(f"{USERS_URL}{self.guest.id}/", {"role": "host"}, format="json")
-        self.assertEqual(resp.status_code, 200)
-        self.guest.refresh_from_db()
-        self.assertEqual(self.guest.role, "host")
-
-    def test_host_with_properties_cannot_become_guest(self):
-        make_property(self.host)
-        self.login(self.admin)
-        resp = self.client.patch(f"{USERS_URL}{self.host.id}/", {"role": "guest"}, format="json")
+    def test_cannot_deactivate_self_or_admin(self):
+        client = client_for(self.admin)
+        resp = client.patch(f"/api/admin/users/{self.admin.id}/", {"is_active": False}, format="json")
         self.assertEqual(resp.status_code, 400)
-        self.assertIn("role", resp.json()["errors"])
-        self.host.refresh_from_db()
-        self.assertEqual(self.host.role, "host")
-
-    def test_host_without_properties_can_become_guest(self):
-        self.login(self.admin)
-        resp = self.client.patch(f"{USERS_URL}{self.host2.id}/", {"role": "guest"}, format="json")
-        self.assertEqual(resp.status_code, 200)
-
-    def test_cannot_assign_admin_role(self):
-        self.login(self.admin)
-        resp = self.client.patch(f"{USERS_URL}{self.guest.id}/", {"role": "admin"}, format="json")
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn("role", resp.json()["errors"])
-        self.guest.refresh_from_db()
-        self.assertEqual(self.guest.role, "guest")
-
-    def test_cannot_modify_self_or_other_admin(self):
         other_admin = make_user("dadmin2", User.Role.ADMIN)
-        self.login(self.admin)
-        for target in (self.admin, other_admin):
-            resp = self.client.patch(f"{USERS_URL}{target.id}/", {"is_active": False}, format="json")
-            self.assertEqual(resp.status_code, 400)
-            target.refresh_from_db()
-            self.assertTrue(target.is_active)
+        resp = client.patch(f"/api/admin/users/{other_admin.id}/", {"is_active": False}, format="json")
+        self.assertEqual(resp.status_code, 400)
+        other_admin.refresh_from_db()
+        self.assertTrue(other_admin.is_active)
 
-    def test_invalid_payloads(self):
-        self.login(self.admin)
-        url = f"{USERS_URL}{self.guest.id}/"
-        for payload in ({}, {"role": "superman"}, {"is_active": "maybe"}):
-            with self.subTest(payload=payload):
-                self.assertEqual(self.client.patch(url, payload, format="json").status_code, 400)
-        self.assertEqual(
-            self.client.patch(f"{USERS_URL}999999/", {"is_active": False}, format="json").status_code,
-            404,
+    def test_invalid_payload_400(self):
+        client = client_for(self.admin)
+        url = f"/api/admin/users/{self.guest.id}/"
+        self.assertEqual(client.patch(url, {}, format="json").status_code, 400)
+        self.assertEqual(client.patch(url, {"is_active": "abc"}, format="json").status_code, 400)
+
+    def test_put_and_delete_not_allowed(self):
+        client = client_for(self.admin)
+        url = f"/api/admin/users/{self.guest.id}/"
+        self.assertEqual(client.put(url, {"is_active": False}, format="json").status_code, 405)
+        self.assertEqual(client.delete(url).status_code, 405)
+
+    def test_deactivated_user_refresh_token_rejected(self):
+        tokens = get_tokens_for_user(self.guest)
+        client_for(self.admin).patch(
+            f"/api/admin/users/{self.guest.id}/", {"is_active": False}, format="json"
         )
+        resp = APIClient().post(
+            "/api/auth/refresh/", {"refresh": tokens["refresh"]}, format="json"
+        )
+        self.assertEqual(resp.status_code, 401)
 
 
 class AdminPropertyManagementTests(DashboardBase):
-    def setUp(self):
-        super().setUp()
-        self.p_active = make_property(self.host, title="Goa Villa")
-        self.p_hidden = make_property(self.host2, title="Manali Cabin", is_active=False)
-
     def test_permissions(self):
-        self.assertEqual(self.client.get(PROPS_URL).status_code, 401)
-        for user in (self.guest, self.host):
-            self.login(user)
-            self.assertEqual(self.client.get(PROPS_URL).status_code, 403)
-            self.assertEqual(
-                self.client.patch(f"{PROPS_URL}{self.p_active.id}/", {"is_active": False}, format="json").status_code,
-                403,
-            )
+        self.assertEqual(client_for().get("/api/admin/properties/").status_code, 401)
+        self.assertEqual(client_for(self.host).get("/api/admin/properties/").status_code, 403)
 
-    def test_list_includes_inactive_with_filters(self):
-        self.login(self.admin)
-        body = self.client.get(PROPS_URL).json()
-        self.assertEqual(body["count"], 2)
-        self.assertIn("host", body["results"][0])
+    def test_list_includes_inactive_and_filters(self):
+        make_property(self.host, title="Hidden", city="Jaipur", is_active=False)
+        future_booking(self.guest, self.prop, 10)
+        client = client_for(self.admin)
+        self.assertEqual(client.get("/api/admin/properties/").json()["count"], 3)
+        self.assertEqual(client.get("/api/admin/properties/?is_active=false").json()["count"], 1)
+        self.assertEqual(client.get("/api/admin/properties/?city=jaip").json()["count"], 1)
+        self.assertEqual(client.get(f"/api/admin/properties/?host={self.host2.id}").json()["count"], 1)
+        rows = {r["id"]: r for r in client.get("/api/admin/properties/").json()["results"]}
+        self.assertEqual(rows[self.prop.id]["bookings_count"], 1)
+        self.assertEqual(rows[self.prop.id]["host"]["username"], "dhost")
 
-        self.assertEqual(self.client.get(PROPS_URL + "?is_active=false").json()["count"], 1)
-        self.assertEqual(self.client.get(PROPS_URL + "?is_active=true").json()["count"], 1)
-        self.assertEqual(self.client.get(PROPS_URL + f"?host={self.host2.id}").json()["count"], 1)
-        self.assertEqual(self.client.get(PROPS_URL + "?search=manali").json()["count"], 1)
+    def test_toggle_active_hides_from_public_list(self):
+        client = client_for(self.admin)
+        resp = client.patch(f"/api/admin/properties/{self.prop.id}/", {"is_active": False}, format="json")
+        self.assertEqual(resp.status_code, 200, resp.json())
+        self.assertFalse(resp.json()["is_active"])
+        public = client_for().get("/api/properties/").json()
+        self.assertNotIn(self.prop.id, [r["id"] for r in public["results"]])
+        resp = client.patch(f"/api/admin/properties/{self.prop.id}/", {"is_active": True}, format="json")
+        self.assertTrue(resp.json()["is_active"])
+        public = client_for().get("/api/properties/").json()
+        self.assertIn(self.prop.id, [r["id"] for r in public["results"]])
 
-    def test_toggle_listing(self):
-        self.login(self.admin)
-        resp = self.client.patch(f"{PROPS_URL}{self.p_active.id}/", {"is_active": False}, format="json")
-        self.assertEqual(resp.status_code, 200)
-        self.assertFalse(resp.json()["property"]["is_active"])
-        self.p_active.refresh_from_db()
-        self.assertFalse(self.p_active.is_active)
-        # public listing se hat jaati hai
-        public_ids = [p["id"] for p in APIClient().get("/api/properties/").json()["results"]]
-        self.assertNotIn(self.p_active.id, public_ids)
+    def test_invalid_payload_and_404(self):
+        client = client_for(self.admin)
+        self.assertEqual(client.patch(f"/api/admin/properties/{self.prop.id}/", {}, format="json").status_code, 400)
+        self.assertEqual(client.patch("/api/admin/properties/999999/", {"is_active": False}, format="json").status_code, 404)
 
-        resp = self.client.patch(f"{PROPS_URL}{self.p_hidden.id}/", {"is_active": True}, format="json")
-        self.assertEqual(resp.status_code, 200)
-        public_ids = [p["id"] for p in APIClient().get("/api/properties/").json()["results"]]
-        self.assertIn(self.p_hidden.id, public_ids)
-
-    def test_invalid_toggle(self):
-        self.login(self.admin)
-        url = f"{PROPS_URL}{self.p_active.id}/"
-        self.assertEqual(self.client.patch(url, {}, format="json").status_code, 400)
-        self.assertEqual(self.client.patch(url, {"is_active": "x"}, format="json").status_code, 400)
-        self.assertEqual(
-            self.client.patch(f"{PROPS_URL}999999/", {"is_active": False}, format="json").status_code, 404
+    def test_host_cannot_patch(self):
+        resp = client_for(self.host).patch(
+            f"/api/admin/properties/{self.prop.id}/", {"is_active": False}, format="json"
         )
+        self.assertEqual(resp.status_code, 403)

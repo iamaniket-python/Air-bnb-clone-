@@ -1,200 +1,270 @@
-from datetime import timedelta
-from decimal import Decimal, InvalidOperation
+from datetime import date, datetime, time, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 
+from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Avg, Count, Sum
+from django.db.models import (
+    Avg,
+    Case,
+    Count,
+    DecimalField,
+    ExpressionWrapper,
+    F,
+    Q,
+    Sum,
+    Value,
+    When,
+)
+from django.db.models.fields.json import KT
+from django.db.models.functions import Cast, Coalesce, TruncMonth
 from django.utils import timezone
-from rest_framework.exceptions import NotFound, ValidationError
 
-from apps.accounts.models import User
 from apps.accounts.services import blacklist_all_tokens
-from apps.bookings.models import Booking
+from apps.bookings.models import ACTIVE_BOOKING_STATUSES, Booking
 from apps.payments.models import Payment
 from apps.properties.models import Property
 from apps.reviews.models import Review
 
-# Plain strings (lesson 1: enum ko dict key mat banao)
-BOOKING_STATUSES = ["pending", "confirmed", "rejected", "cancelled", "completed"]
-ROLES = ["guest", "host", "admin"]
-PAYMENT_STATUSES = ["pending", "success", "failed", "refunded"]
-PAID_STATUSES = ["success", "refunded"]
-UPCOMING_STATUSES = ["pending", "confirmed"]
-ASSIGNABLE_ROLES = ["guest", "host"]
-RECENT_BOOKINGS_LIMIT = 5
+User = get_user_model()
+
+# Plain strings (lesson 1: enum members dict/hash lookup mein nahi)
+BOOKING_PENDING = "pending"
+PAYMENT_SUCCESS = "success"
+PAYMENT_REFUNDED = "refunded"
+EARNING_STATUSES = [PAYMENT_SUCCESS, PAYMENT_REFUNDED]
+
+CURRENCY = "INR"
+MONTHS_WINDOW = 6
+NEXT_RESERVATIONS_LIMIT = 5
 NEW_USERS_WINDOW_DAYS = 30
+
+MONEY = DecimalField(max_digits=12, decimal_places=2)
 ZERO = Decimal("0.00")
-CENT = Decimal("0.01")
+TWO_PLACES = Decimal("0.01")
 
 
 # ---------------------------------------------------------------- helpers
 def money(value):
-    """Decimal -> '1234.50' string."""
-    return str(Decimal(value).quantize(CENT))
+    value = Decimal(str(value)) if value is not None else ZERO
+    return f"{value.quantize(TWO_PLACES, rounding=ROUND_HALF_UP):.2f}"
 
 
-def to_decimal(value):
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError, TypeError):
-        return ZERO
+def rating_value(value):
+    if value is None:
+        return "0.00"
+    return money(value)
 
 
-def breakdown(queryset, field, keys):
-    """{key: count} sab keys ke saath (0 default). order_by() zaroori hai (GROUP BY)."""
-    counts = {key: 0 for key in keys}
-    rows = queryset.order_by().values(field).annotate(n=Count("id"))
-    for row in rows:
-        counts[row[field]] = row["n"]
-    return counts
-
-
-def calculate_earnings(payments):
-    """
-    payments: Payment queryset (host ki ya poore platform ki).
-    gross    = success + refunded payments ka amount
-    refunded = sirf refunded payments ke raw_response["refund"]["amount"]
-    net      = gross - refunded
-    """
-    gross = (
-        payments.filter(status__in=PAID_STATUSES).aggregate(total=Sum("amount"))["total"]
-        or ZERO
-    )
-    refunded = ZERO
-    for raw in payments.filter(status="refunded").values_list("raw_response", flat=True):
-        refund = raw.get("refund") if isinstance(raw, dict) else None
-        if isinstance(refund, dict):
-            refunded += to_decimal(refund.get("amount", 0))
-    return {
-        "gross": money(gross),
-        "refunded": money(refunded),
-        "net": money(gross - refunded),
-        "currency": "INR",
+def status_breakdown(qs, statuses):
+    """{status: count}, saare statuses zero-filled, keys plain strings."""
+    counts = {
+        row["status"]: row["n"]
+        for row in qs.values("status").annotate(n=Count("id")).order_by()
     }
+    return {s: counts.get(s, 0) for s in statuses}
 
 
-# ----------------------------------------------------------- host dashboard
+def shift_month(first_of_month, delta):
+    idx = first_of_month.year * 12 + (first_of_month.month - 1) + delta
+    return date(idx // 12, idx % 12 + 1, 1)
+
+
+def last_months(today, n=MONTHS_WINDOW):
+    current = today.replace(day=1)
+    return [shift_month(current, -i) for i in range(n - 1, -1, -1)]
+
+
+def with_net_amount(payments_qs):
+    """
+    success + refunded payments par refunded_amount aur net_amount annotate.
+    refund amount raw_response["refund"]["amount"] se (DB level cast).
+    Refunded status par amount missing ho to full refund maana jaata hai.
+    """
+    refund_text = KT("raw_response__refund__amount")
+    fallback = Case(
+        When(status=PAYMENT_REFUNDED, then=F("amount")),
+        default=Value(ZERO),
+        output_field=MONEY,
+    )
+    return (
+        payments_qs.filter(status__in=EARNING_STATUSES)
+        .annotate(
+            refunded_amount=Coalesce(
+                Cast(refund_text, MONEY), fallback, output_field=MONEY
+            )
+        )
+        .annotate(
+            net_amount=ExpressionWrapper(
+                F("amount") - F("refunded_amount"), output_field=MONEY
+            )
+        )
+    )
+
+
+def monthly_earnings(payments_qs, today):
+    months = last_months(today)
+    start = timezone.make_aware(datetime.combine(months[0], time.min))
+    rows = (
+        with_net_amount(payments_qs)
+        .filter(paid_at__gte=start)
+        .annotate(month=TruncMonth("paid_at"))
+        .values("month")
+        .annotate(amount=Sum("net_amount"))
+        .order_by("month")
+    )
+    by_month = {row["month"].strftime("%Y-%m"): row["amount"] for row in rows}
+    return [
+        {"month": m.strftime("%Y-%m"), "amount": money(by_month.get(m.strftime("%Y-%m")))}
+        for m in months
+    ]
+
+
+# ---------------------------------------------------------------- host
 def get_host_dashboard(host, today=None):
     today = today or timezone.localdate()
 
-    properties = Property.objects.filter(host=host)
-    bookings = Booking.objects.filter(property__host=host)
-    payments = Payment.objects.filter(booking__property__host=host)
+    props = Property.objects.filter(host=host).aggregate(
+        total=Count("id"),
+        active=Count("id", filter=Q(is_active=True)),
+    )
 
-    recent = bookings.select_related("property", "guest").order_by("-created_at", "-id")[
-        :RECENT_BOOKINGS_LIMIT
-    ]
+    bookings = Booking.objects.filter(property__host=host)
+    upcoming_q = Q(status__in=ACTIVE_BOOKING_STATUSES, check_in__gte=today)
+    booking_stats = bookings.aggregate(
+        total=Count("id"),
+        upcoming=Count("id", filter=upcoming_q),
+        pending=Count(
+            "id", filter=Q(status=BOOKING_PENDING, check_in__gte=today)
+        ),
+    )
+
+    payments = Payment.objects.filter(booking__property__host=host)
+    total_earnings = with_net_amount(payments).aggregate(
+        total=Coalesce(Sum("net_amount"), Value(ZERO), output_field=MONEY)
+    )["total"]
+    monthly = monthly_earnings(payments, today)
+
+    review_stats = Review.objects.filter(booking__property__host=host).aggregate(
+        count=Count("id"), avg=Avg("rating")
+    )
+
+    next_reservations = list(
+        bookings.filter(upcoming_q)
+        .select_related("guest", "property")
+        .order_by("check_in", "id")[:NEXT_RESERVATIONS_LIMIT]
+    )
 
     return {
         "properties": {
-            "total": properties.count(),
-            "active": properties.filter(is_active=True).count(),
+            "total": props["total"],
+            "active": props["active"],
+            "inactive": props["total"] - props["active"],
         },
         "bookings": {
-            "total": bookings.count(),
-            "upcoming_reservations": bookings.filter(
-                status__in=UPCOMING_STATUSES, check_in__gte=today
-            ).count(),
-            "pending_requests": bookings.filter(status="pending").count(),
-            "by_status": breakdown(bookings, "status", BOOKING_STATUSES),
+            "total": booking_stats["total"],
+            "upcoming_reservations": booking_stats["upcoming"],
+            "pending_requests": booking_stats["pending"],
+            "by_status": status_breakdown(bookings, Booking.Status.values),
         },
-        "earnings": calculate_earnings(payments),
-        "recent_bookings": [
-            {
-                "id": b.id,
-                "property_id": b.property_id,
-                "property_title": b.property.title,
-                "guest_username": b.guest.username,
-                "check_in": b.check_in.isoformat(),
-                "check_out": b.check_out.isoformat(),
-                "status": b.status,
-                "total_price": money(b.total_price),
-            }
-            for b in recent
-        ],
+        "earnings": {
+            "currency": CURRENCY,
+            "total": money(total_earnings),
+            "this_month": monthly[-1]["amount"],
+            "monthly": monthly,
+        },
+        "reviews": {
+            "count": review_stats["count"],
+            "average_rating": rating_value(review_stats["avg"]),
+        },
+        "next_reservations": next_reservations,
     }
 
 
-# ---------------------------------------------------------- admin dashboard
-def get_admin_dashboard(now=None):
-    now = now or timezone.now()
-    since = now - timedelta(days=NEW_USERS_WINDOW_DAYS)
+# ---------------------------------------------------------------- admin
+def get_admin_dashboard(today=None):
+    today = today or timezone.localdate()
+    since = timezone.now() - timedelta(days=NEW_USERS_WINDOW_DAYS)
 
-    users = User.objects.all()
-    properties = Property.objects.all()
+    user_stats = User.objects.aggregate(
+        total=Count("id"),
+        active=Count("id", filter=Q(is_active=True)),
+        new=Count("id", filter=Q(date_joined__gte=since)),
+    )
+    roles = {
+        row["role"]: row["n"]
+        for row in User.objects.values("role").annotate(n=Count("id")).order_by()
+    }
+
+    prop_stats = Property.objects.aggregate(
+        total=Count("id"), active=Count("id", filter=Q(is_active=True))
+    )
+
     bookings = Booking.objects.all()
+    booking_stats = bookings.aggregate(
+        total=Count("id"),
+        upcoming=Count(
+            "id", filter=Q(status__in=ACTIVE_BOOKING_STATUSES, check_in__gte=today)
+        ),
+        recent=Count("id", filter=Q(created_at__gte=since)),
+    )
+
+    review_stats = Review.objects.aggregate(count=Count("id"), avg=Avg("rating"))
+
     payments = Payment.objects.all()
-    review_stats = Review.objects.aggregate(total=Count("id"), avg=Avg("rating"))
-    avg = review_stats["avg"]
+    revenue = with_net_amount(payments).aggregate(
+        gross=Coalesce(Sum("amount"), Value(ZERO), output_field=MONEY),
+        refunded=Coalesce(Sum("refunded_amount"), Value(ZERO), output_field=MONEY),
+        net=Coalesce(Sum("net_amount"), Value(ZERO), output_field=MONEY),
+    )
 
     return {
         "users": {
-            "total": users.count(),
-            "by_role": breakdown(users, "role", ROLES),
-            "inactive": users.filter(is_active=False).count(),
-            "new_last_30_days": users.filter(date_joined__gte=since).count(),
+            "total": user_stats["total"],
+            "active": user_stats["active"],
+            "inactive": user_stats["total"] - user_stats["active"],
+            "new_last_30_days": user_stats["new"],
+            "by_role": {r: roles.get(r, 0) for r in User.Role.values},
         },
         "properties": {
-            "total": properties.count(),
-            "active": properties.filter(is_active=True).count(),
+            "total": prop_stats["total"],
+            "active": prop_stats["active"],
+            "inactive": prop_stats["total"] - prop_stats["active"],
         },
         "bookings": {
-            "total": bookings.count(),
-            "by_status": breakdown(bookings, "status", BOOKING_STATUSES),
+            "total": booking_stats["total"],
+            "upcoming": booking_stats["upcoming"],
+            "created_last_30_days": booking_stats["recent"],
+            "by_status": status_breakdown(bookings, Booking.Status.values),
         },
         "reviews": {
-            "total": review_stats["total"] or 0,
-            "average_rating": money(to_decimal(avg)) if avg is not None else "0.00",
+            "count": review_stats["count"],
+            "average_rating": rating_value(review_stats["avg"]),
         },
         "payments": {
-            "by_status": breakdown(payments, "status", PAYMENT_STATUSES),
-            "revenue": calculate_earnings(payments),
+            "currency": CURRENCY,
+            "gross": money(revenue["gross"]),
+            "refunded": money(revenue["refunded"]),
+            "net": money(revenue["net"]),
+            "by_status": status_breakdown(payments, Payment.Status.values),
         },
+        "generated_at": timezone.now(),
     }
 
 
-# -------------------------------------------------------- admin: users
-def update_user(actor, user_id, *, is_active=None, role=None):
-    try:
-        target = User.objects.get(pk=user_id)
-    except User.DoesNotExist:
-        raise NotFound("User not found.")
-
-    if target.pk == actor.pk:
-        raise ValidationError({"detail": ["You cannot modify your own account here."]})
-    if target.is_superuser or target.role == "admin":
-        raise ValidationError({"detail": ["Admin accounts cannot be modified here."]})
-
-    if role is not None and role != target.role:
-        if role not in ASSIGNABLE_ROLES:
-            raise ValidationError({"role": ["Role must be 'guest' or 'host'."]})
-        if role != "host" and target.properties.exists():
-            raise ValidationError(
-                {"role": ["This host still has properties. Deactivate or remove them first."]}
-            )
-
+# ---------------------------------------------------------------- admin actions
+def set_user_active(user, is_active):
     with transaction.atomic():
-        target = User.objects.select_for_update().get(pk=user_id)
-        fields = []
-        if is_active is not None and is_active != target.is_active:
-            target.is_active = is_active
-            fields.append("is_active")
-        if role is not None and role != target.role:
-            target.role = role
-            fields.append("role")
-        if fields:
-            target.save(update_fields=fields)
-        if "is_active" in fields and not target.is_active:
-            blacklist_all_tokens(target)  # deactivate par saare refresh tokens bekaar
-    return target
+        User.objects.filter(pk=user.pk).update(is_active=is_active)
+        user.is_active = is_active
+    if not is_active:
+        blacklist_all_tokens(user)
+    return user
 
 
-# ---------------------------------------------------- admin: properties
-def set_property_active(property_id, is_active):
-    try:
-        prop = Property.objects.get(pk=property_id)
-    except Property.DoesNotExist:
-        raise NotFound("Property not found.")
-    if prop.is_active != is_active:
-        prop.is_active = is_active
-        prop.save(update_fields=["is_active", "updated_at"])
+def set_property_active(prop, is_active):
+    # .update(): clean()/save() side-effects nahi, sirf listing toggle
+    Property.objects.filter(pk=prop.pk).update(
+        is_active=is_active, updated_at=timezone.now()
+    )
+    prop.is_active = is_active
     return prop
