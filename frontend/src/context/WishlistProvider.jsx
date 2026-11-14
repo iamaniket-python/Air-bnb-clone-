@@ -12,7 +12,7 @@ export default function WishlistProvider({ children }) {
   const isGuest = isAuthenticated && role === 'guest'
   const userKey = user?.id ?? user?.username ?? null
 
-  // userId saath mein rakha: user badle to purane user ke ids kabhi dikhte nahi
+  // userKey saath mein rakha: user badle to purane user ke ids kabhi dikhte nahi
   const [state, setState] = useState({ userKey: null, ids: [] })
 
   useEffect(() => {
@@ -30,10 +30,10 @@ export default function WishlistProvider({ children }) {
     }
   }, [isGuest, userKey])
 
-  const ids = useMemo(
-    () => new Set(isGuest && state.userKey === userKey ? state.ids : []),
-    [isGuest, state, userKey],
-  )
+  // loaded: current guest ki ids aa chuki hain (Wishlist page isse flicker rokta hai)
+  const loaded = isGuest && state.userKey === userKey
+
+  const ids = useMemo(() => new Set(loaded ? state.ids : []), [loaded, state])
 
   const setSaved = useCallback(
     (propertyId, shouldBeSaved) => {
@@ -70,10 +70,7 @@ export default function WishlistProvider({ children }) {
     [ids, setSaved, toast],
   )
 
-  const value = useMemo(
-    () => ({ ids, isSaved: (id) => ids.has(id), toggle }),
-    [ids, toggle],
-  )
+  const value = useMemo(() => ({ ids, loaded, isSaved: (id) => ids.has(id), toggle }), [ids, loaded, toggle])
 
   return <WishlistContext.Provider value={value}>{children}</WishlistContext.Provider>
 }

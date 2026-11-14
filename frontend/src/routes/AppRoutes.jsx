@@ -8,6 +8,11 @@ import Login from '../pages/Login'
 import Register from '../pages/Register'
 import PropertyListing from '../pages/PropertyListing'
 import PropertyDetails from '../pages/PropertyDetails'
+import Checkout from '../pages/Checkout'
+import Payment from '../pages/Payment'
+import MyBookings from '../pages/MyBookings'
+import Wishlist from '../pages/Wishlist'
+import Profile from '../pages/Profile'
 import ComingSoon from '../pages/ComingSoon'
 import Forbidden from '../pages/Forbidden'
 import NotFound from '../pages/NotFound'
@@ -33,15 +38,15 @@ export default function AppRoutes() {
 
         {/* Guest (10c) */}
         <Route element={<ProtectedRoute roles={['guest']} />}>
-          <Route path="/checkout" element={<ComingSoon title="Booking checkout" phase="10c" />} />
-          <Route path="/payment/:bookingId" element={<ComingSoon title="Payment" phase="10c" />} />
-          <Route path="/bookings" element={<ComingSoon title="My bookings" phase="10c" />} />
-          <Route path="/wishlist" element={<ComingSoon title="Wishlist" phase="10c" />} />
+          <Route path="/checkout" element={<Checkout />} />
+          <Route path="/payment/:bookingId" element={<Payment />} />
+          <Route path="/bookings" element={<MyBookings />} />
+          <Route path="/wishlist" element={<Wishlist />} />
         </Route>
 
         {/* Kisi bhi logged-in role ke liye (10c) */}
         <Route element={<ProtectedRoute />}>
-          <Route path="/profile" element={<ComingSoon title="Profile" phase="10c" />} />
+          <Route path="/profile" element={<Profile />} />
         </Route>
 
         {/* Host (10d) */}
