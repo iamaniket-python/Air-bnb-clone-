@@ -20,12 +20,15 @@ export default function ReviewModal({ booking, onClose, onDone }) {
       setError('Please select a rating from 1 to 5.')
       return
     }
+    // Backend comment ko required maanta hai (khali par 400 deta hai)
+    if (!comment.trim()) {
+      setError('Please write a short comment about your stay.')
+      return
+    }
     setSubmitting(true)
     setError('')
     try {
-      const payload = { booking: booking.id, rating }
-      if (comment.trim()) payload.comment = comment.trim()
-      await createReview(payload)
+      await createReview({ booking: booking.id, rating, comment: comment.trim() })
       toast.success('Thanks! Your review has been posted.')
       onDone()
     } catch (err) {
@@ -59,7 +62,7 @@ export default function ReviewModal({ booking, onClose, onDone }) {
 
         <div>
           <label htmlFor="review-comment" className="mb-1 block text-sm font-medium text-slate-700">
-            Comment (optional)
+            Comment
           </label>
           <textarea
             id="review-comment"
