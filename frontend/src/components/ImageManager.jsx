@@ -8,10 +8,10 @@ import useToast from '../hooks/useToast'
 import { deleteImage, updateImage, uploadImages } from '../api/properties'
 import { normalizeApiError } from '../utils/apiError'
 import { errorText } from '../utils/errors'
+import { compressImage, MAX_ORIGINAL_BYTES, MAX_UPLOAD_BYTES } from '../utils/image'
 import { mediaUrl } from '../utils/media'
 
 const MAX_FILES = 15
-const MAX_BYTES = 5 * 1024 * 1024
 
 export default function ImageManager({ propertyId }) {
   const toast = useToast()
@@ -19,6 +19,7 @@ export default function ImageManager({ propertyId }) {
   // Apna alag fetch: upload ke baad sirf yehi reload hota hai, form ke unsaved edits safe rehte hain
   const { data: property, loading, error, reload } = useApi(`/properties/${propertyId}/`)
   const [busy, setBusy] = useState(false)
+  const [progress, setProgress] = useState('')
   const [formError, setFormError] = useState('')
 
   const images = [...(property?.images ?? [])].sort(
@@ -39,7 +40,7 @@ export default function ImageManager({ propertyId }) {
     }
   }
 
-  const onPick = (e) => {
+  const onPick = async (e) => {
     const files = Array.from(e.target.files ?? [])
     e.target.value = '' // same file dobara chun sakein
     if (files.length === 0) return
@@ -53,12 +54,36 @@ export default function ImageManager({ propertyId }) {
       setFormError(`"${bad.name}" is not an image.`)
       return
     }
-    const big = files.find((f) => f.size > MAX_BYTES)
-    if (big) {
-      setFormError(`"${big.name}" is larger than 5 MB.`)
+    const huge = files.find((f) => f.size > MAX_ORIGINAL_BYTES)
+    if (huge) {
+      setFormError(`"${huge.name}" is larger than 25 MB.`)
       return
     }
-    run(() => uploadImages(propertyId, files), `${files.length} photo(s) uploaded.`)
+
+    setBusy(true)
+    setFormError('')
+    let uploaded = 0
+    try {
+      // Ek-ek photo alag request mein: hosting ke request size limit se bachne ke liye
+      for (const file of files) {
+        setProgress(`Uploading photo ${uploaded + 1} of ${files.length}...`)
+        const ready = await compressImage(file)
+        if (ready.size > MAX_UPLOAD_BYTES) {
+          throw new Error(`"${file.name}" is still larger than 4 MB after compression.`)
+        }
+        await uploadImages(propertyId, [ready])
+        uploaded += 1
+      }
+      toast.success(`${uploaded} photo(s) uploaded.`)
+    } catch (err) {
+      // Axios error ho to server ka message, warna hamara apna message
+      const message = err?.isAxiosError ? errorText(normalizeApiError(err)) : err.message
+      setFormError(uploaded > 0 ? `${uploaded} uploaded, then failed: ${message}` : message)
+    } finally {
+      setBusy(false)
+      setProgress('')
+      if (uploaded > 0) reload()
+    }
   }
 
   const remove = (img) => {
@@ -71,7 +96,9 @@ export default function ImageManager({ propertyId }) {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="font-semibold">Photos</h2>
-          <p className="text-xs text-slate-500">Up to {MAX_FILES} photos, 5 MB each. The starred photo is the cover.</p>
+          <p className="text-xs text-slate-500">
+            Up to {MAX_FILES} photos. Large photos are resized automatically. The starred photo is the cover.
+          </p>
         </div>
         <div>
           <input ref={inputRef} type="file" accept="image/*" multiple hidden onChange={onPick} />
@@ -82,6 +109,7 @@ export default function ImageManager({ propertyId }) {
       </div>
 
       <div className="mt-4 space-y-3">
+        {progress && <p className="text-sm text-slate-600">{progress}</p>}
         <Alert message={formError} />
         {error && <Alert message={error.message} />}
 
