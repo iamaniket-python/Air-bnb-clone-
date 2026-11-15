@@ -1,6 +1,8 @@
 import { useCallback, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { FiCalendar, FiChevronDown, FiGrid, FiHeart, FiLogOut, FiPlusCircle, FiUser } from 'react-icons/fi'
+import {
+  FiCalendar, FiChevronDown, FiGrid, FiHeart, FiHome, FiLogOut, FiMessageSquare, FiPlusCircle, FiUser, FiUsers,
+} from 'react-icons/fi'
 import Logo from './Logo'
 import NavSearch from './NavSearch'
 import Button from './Button'
@@ -19,11 +21,16 @@ const MENU = {
   host: [
     { to: '/host/dashboard', label: 'Dashboard', Icon: FiGrid },
     { to: '/host/reservations', label: 'Reservations', Icon: FiCalendar },
+    { to: '/host/properties', label: 'My properties', Icon: FiHome },
     { to: '/host/properties/new', label: 'Add property', Icon: FiPlusCircle },
     { to: '/profile', label: 'Profile', Icon: FiUser },
   ],
   admin: [
-    { to: '/admin/dashboard', label: 'Admin dashboard', Icon: FiGrid },
+    { to: '/admin/dashboard', label: 'Dashboard', Icon: FiGrid },
+    { to: '/admin/users', label: 'Users', Icon: FiUsers },
+    { to: '/admin/properties', label: 'Properties', Icon: FiHome },
+    { to: '/admin/bookings', label: 'Bookings', Icon: FiCalendar },
+    { to: '/admin/reviews', label: 'Reviews', Icon: FiMessageSquare },
     { to: '/profile', label: 'Profile', Icon: FiUser },
   ],
 }
