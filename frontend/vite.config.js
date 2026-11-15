@@ -19,5 +19,11 @@ export default defineConfig({
     include: ['src/test/**/*.test.{js,jsx}'],
     css: false,
     env: { VITE_API_BASE_URL: 'http://localhost:3000/api' },
+    coverage: {
+      provider: 'v8',
+      reporter: ['text-summary', 'text', 'html'],
+      include: ['src/**/*.{js,jsx}'],
+      exclude: ['src/test/**', 'src/main.jsx'],
+    },
   },
 })
